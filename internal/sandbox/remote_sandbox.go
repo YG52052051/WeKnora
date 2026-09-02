@@ -8,8 +8,7 @@
 //
 //   - Ephemeral: one call to Execute allocates a sandbox, uploads the script,
 //     runs it, then deletes the sandbox regardless of success. This gives
-//     stateless-per-call semantics for callers without a SessionID, matching
-//     the Local backend.
+//     stateless-per-call semantics for callers without a SessionID.
 //   - Persistent (session-bound): SessionBoundManager resolves the session's
 //     RemoteSandboxHandle through the lifecycle coordinator and hands it to
 //     RemoteSandbox.ExecuteOnHandle. The handle stays owned by the manager;
@@ -111,6 +110,30 @@ func (s *RemoteSandbox) ExecuteOnHandle(
 	}
 	if cfg == nil {
 		return nil, ErrInvalidScript
+	}
+
+	// Scripts already on disk skip upload so the skill venv layout is not
+	// shadowed. Image paths derive the skill directory; workspace paths
+	// require an explicit SkillDir so arbitrary files cannot inherit a
+	// skill interpreter by accident.
+	if remote := strings.TrimSpace(cfg.RemoteScriptPath); remote != "" {
+		skillDir, ok := InterpreterSkillDir(remote, cfg.SkillDir)
+		if !ok {
+			return nil, ErrInvalidScript
+		}
+		command, baseArgs := SkillInterpreterCommand(skillDir, path.Clean(remote))
+		request := RemoteExecRequest{
+			Command: command,
+			Args:    append(baseArgs, cfg.Args...),
+			Stdin:   cfg.Stdin,
+			Env:     cfg.Env,
+			WorkDir: SessionWorkspaceRoot,
+			User:    DefaultSandboxExecUser,
+			Timeout: effectiveTimeout(cfg, 0),
+		}
+		start := time.Now()
+		execResult, err := s.client.Exec(ctx, handle, request)
+		return remoteExecuteResult(execResult, err, time.Since(start)), nil
 	}
 
 	content, err := readScriptContent(cfg)
@@ -216,7 +239,7 @@ func getInterpreter(scriptName string) string {
 		return "python3"
 	case ".sh", ".bash":
 		return "bash"
-	case ".js":
+	case ".js", ".mjs", ".cjs":
 		return "node"
 	case ".rb":
 		return "ruby"
